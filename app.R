@@ -1,0 +1,1478 @@
+library(shiny)
+library(shinythemes)
+library(leaflet)
+library(tidyverse)    # Replaces dplyr, ggplot2, tidyr, readr, purrr
+library(ggridges)
+library(sf)
+library(tigris)
+library(lubridate)
+library(hrbrthemes)
+library(raster)
+library(RColorBrewer)
+library(soiltexture)
+library(ggtern)
+library(ggpmisc)
+Sys.setenv("VROOM_CONNECTION_SIZE" = 131072 * 3) # Doubling the default, or choose a larger value
+
+# --- Data Loading and Preprocessing (Initial Load - essential for UI setup) ---
+# Data loaded globally will be available to all sessions and loaded only once.
+# These datasets are either small or required for initial UI rendering across tabs.
+CLOUD_DATA_BASE_URL <- "data/"
+weather <- readRDS(paste0(CLOUD_DATA_BASE_URL, "all_10farms_daymet_data.rds"))
+data <- weather %>%
+  mutate(
+    yy = paste(year, yday, sep = "-"),
+    date = as.POSIXct(yy, format = "%Y-%j"),
+    month_num = lubridate::month(date),
+    month = lubridate::month(date, abbr = T, label = T)
+  )
+georgia_boundary <- readRDS(paste0(CLOUD_DATA_BASE_URL, "ga_bound.rds")) %>%
+  st_transform(crs = 4326)
+location_data <- data %>% distinct(loc, lon, lat)
+ga_counties <- readRDS(paste0(CLOUD_DATA_BASE_URL, "ga_counties_bound.rds")) %>%
+  st_transform(crs = 4326)
+
+# rec_summary is loaded once globally as it's needed for the REC Profiles tab's UI on startup
+rec_summary <- location_data %>%
+  left_join(readRDS(paste0(CLOUD_DATA_BASE_URL, "temp_recs.rds")) %>% rename(value = 1), by = "loc") %>%
+  left_join(readRDS(paste0(CLOUD_DATA_BASE_URL, "ppt_recs.rds")) %>% rename(value = 1), by = "loc") %>%
+  left_join(readRDS(paste0(CLOUD_DATA_BASE_URL, "03_recs_soil_dist.rds")) %>% st_drop_geometry() %>% dplyr::select(4, value = sandtotal_r) %>% rename(sand = value), by = "loc") %>%
+  left_join(readRDS(paste0(CLOUD_DATA_BASE_URL, "03_recs_soil_dist.rds")) %>% st_drop_geometry() %>% dplyr::select(4, value = silttotal_r) %>% rename(silt = value), by = "loc") %>%
+  left_join(readRDS(paste0(CLOUD_DATA_BASE_URL, "03_recs_soil_dist.rds")) %>% st_drop_geometry() %>% dplyr::select(4, value = claytotal_r) %>% rename(clay = value), by = "loc")
+
+# --- UI Definition ---
+ui <- navbarPage(
+  title = div("   🌤   UGA REC Climate Dashboard", style = "font-weight: bold; color: white;"),
+  theme = shinytheme("flatly"),
+  header = tags$head(
+    # JavaScript for map resizing and collapsible sections
+    tags$script(HTML("
+      Shiny.addCustomMessageHandler('resizeMap', function(id) {
+        setTimeout(function() {
+          var map = $('#' + id).data('leaflet-map');
+          if (map) {
+            map.invalidateSize();
+          }
+        }, 300);
+      });
+      $(document).on('click', '.collapsible-header', function() {
+        var body = $(this).next('.collapsible-body');
+        body.toggleClass('open');
+        $(this).find('.arrow-icon').toggleClass('rotate'); // Toggle class on specific arrow span
+      });
+    ")),
+    # Consolidated CSS styles
+    tags$style(HTML("
+      #logo-container {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        background: linear-gradient(135deg, #004f9f, #a8192e); /* UGA-like gradient */
+        padding: 10px 15px;
+        border-radius: 10px;
+        z-index: 1000;
+        color: white;
+        text-align: center;
+        box-shadow: 0px 0px 10px rgba(0,0,0,0.2);
+      }
+      #logo-container h4 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: bold;
+      }
+      #logo-container img {
+        margin-top: 5px;
+        height: 25px;
+      }
+      /* Navbar background gradient */
+      .navbar {
+        background: linear-gradient(to right, #2193b0, #6dd5ed);
+        border-bottom: 3px solid #1565c0;
+      }
+      .navbar .navbar-nav > li > a {
+        color: white !important;
+        font-weight: bold;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+      }
+      .navbar .navbar-nav > .active > a,
+      .navbar .navbar-nav > .active > a:focus,
+      .navbar .navbar-nav > .active > a:hover {
+        background: linear-gradient(to right, #43cea2, #185a9d) !important;
+        color: white !important;
+      }
+      /* Dropdown menu style */
+      .dropdown-menu {
+        background: linear-gradient(to bottom right, #ffffff, #f3f3f3);
+        border: none;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+      }
+      .dropdown-menu > li > a {
+        color: #333;
+        font-weight: 500;
+      }
+      .dropdown-menu > li > a:hover {
+        background-color: #e0f7fa;
+        color: #000;
+      }
+      .collapsible-container {
+        border: 1px solid #90caf9;
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 10px;
+        box-shadow: 1px 1px 5px rgba(0,0,0,0.1);
+      }
+      .collapsible-header {
+        background: linear-gradient(to right, #e3f2fd, #bbdefb);
+        padding: 12px 16px;
+        font-size: 18px;
+        font-weight: bold;
+        cursor: pointer;
+        border-top-left-radius: 10px;
+        border-top-right-radius: 10px;
+        transition: background 0.3s ease;
+        display: flex; /* For aligning arrow */
+        justify-content: space-between; /* For aligning arrow */
+        align-items: center; /* For aligning arrow */
+      }
+      .collapsible-header:hover {
+        background: linear-gradient(to right, #bbdefb, #90caf9);
+      }
+      .collapsible-body {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.4s ease;
+        padding: 0 16px;
+      }
+      .collapsible-body.open {
+        max-height: 1000px; /* Large enough to show full content */
+      }
+      .info-card {
+        background: linear-gradient(to right, #e0f7fa, #e1bee7);
+        border-radius: 15px;
+        padding: 15px;
+        margin-bottom: 10px;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
+        text-align: center;
+      }
+      .info-card h4 {
+        margin-top: 0;
+        margin-bottom: 5px;
+        font-weight: bold;
+      }
+      .info-card p {
+        margin: 0;
+        font-size: 18px; /* Increased from 16px */
+      }
+      .nav-tabs > li > a {
+        color: #333; font-weight: bold;
+        background-color: #f0f0f0;
+      }
+      .nav-tabs > li.active > a {
+        background: linear-gradient(to right, #74ebd5, #9face6);
+        color: black !important;
+      }
+      /* Custom CSS for progress circle */
+      .progress-circle-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        margin-top: 20px;
+      }
+      .progress-circle {
+        width: 180px; /* Larger size */
+        height: 180px; /* Larger size */
+        border-radius: 50%;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        background: conic-gradient(
+          #002060 0% var(--percentage), /* Dark blue for the filled part */
+          #e0e0e0 var(--percentage) 100% /* Light gray for the unfilled part */
+        );
+      }
+      .progress-inner-circle { /* New element for the white background behind text */
+        position: absolute;
+        width: 120px; /* Size for inner white circle */
+        height: 120px;
+        border-radius: 50%;
+        background: white; /* Inner white background */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1; /* Ensure this is above the conic gradient */
+      }
+      .progress-circle .progress-value {
+        position: relative; /* Essential for z-index to work against siblings */
+        z-index: 2; /* Ensure text is above the inner white circle */
+        color: #000; /* Explicitly set to black */
+        font-weight: bold;
+        font-size: 2.5em; /* Increased font size for visibility */
+      }
+      .progress-text {
+        margin-top: 10px;
+        font-size: 1.2em;
+        color: #555;
+      }
+      /* Styles for new info cards for REC Profiles tab */
+      .rec-profile-section {
+        margin-top: 20px;
+        padding: 15px;
+        border: 1px solid #ddd;
+        border-radius: 10px;
+        background-color: #f9f9f9;
+        box-shadow: 1px 1px 5px rgba(0,0,0,0.05);
+      }
+      .rec-profile-section h5 {
+        margin-top: 0;
+        color: #007bff;
+        font-weight: bold;
+        border-bottom: 2px solid #007bff;
+        padding-bottom: 5px;
+        margin-bottom: 10px;
+      }
+      .arrow-icon {
+        display: inline-block;
+        transition: transform 0.3s ease;
+      }
+      .arrow-icon.rotate {
+        transform: rotate(180deg);
+      }
+    "))
+  ),
+  tags$div(id = "logo-container", tags$img(src = "uga_logo.png", height = "50px")),
+  # Welcome Dropdown Tab
+  navbarMenu("Welcome",
+             tabPanel("About",
+                      fluidPage(
+                        br(),
+                        h1("   📘    Welcome to the \ud83c\udf24\ufe0f UGA REC Climate Dashboard"),
+                        p("This dashboard provides insights into historical weather data collected across multiple UGA Research and Extension Centers."),
+                        div(class = "collapsible-container",
+                            div(class = "collapsible-header", "   📱    About the App 🔽"),
+                            div(class = "collapsible-body",
+                                tags$p("This interactive dashboard was built using the R Shiny framework was developed to", tags$strong("demonstrate the potential of dynamic web-based applications"), "for exploring climate variability across the University of Georgia’s Research and Education Centers (UGA RECs)."),
+                                tags$p("The dashboard is fully reactive, allowing real-time exploration of precipitation and temperature data across multiple locations and years, months, and site selection.")
+                            )
+                        ),
+                        div(class = "collapsible-container",
+                            div(class = "collapsible-header", "   📦    Data Description 🔽"),
+                            div(class = "collapsible-body",
+                                tags$p("The dataset used in this dashboard originates from ",
+                                       tags$strong("Daymet — Daily Surface Weather and Climatological Summaries"),
+                                       ", a high-resolution gridded dataset developed and maintained by the ",
+                                       "Environmental Sciences Division of the",
+                                       tags$strong("Oak Ridge National Laboratory (ORNL)"),
+                                       "in collaboration with the",
+                                       tags$strong("U.S. Department of Energy (DOE).")),
+                                tags$p("Daymet provides daily meteorological data for North America, characterized by:"),
+                                tags$ul(
+                                  tags$li("Spatial resolution: 1 km × 1 km grid"),
+                                  tags$li("Temporal resolution: Daily time steps")
+                                ),
+                                tags$p("For this application, daily weather data were extracted for ",
+                                       tags$strong("nine specific locations"),
+                                       " where the University of Georgia (UGA) Research and Education Centers (RECs) are located. ",
+                                       "The dataset spans from ",
+                                       tags$strong("1980 to 2023"), "."),
+                                tags$p("Two key variables are explored:"),
+                                tags$ul(
+                                  tags$li("Precipitation – daily total (millimeters)"),
+                                  tags$li("Temperature – daily maximum and minimum (°C)")
+                                ),
+                                tags$p("These variables have been aggregated and analyzed seasonally and annually to provide insights ",
+                                       "into long-term climate trends across UGA research sites.")
+                            )
+                        ),
+                        div(class = "collapsible-container",
+                            div(class = "collapsible-header", "   🔍    Features 🔽"),
+                            div(class = "collapsible-body",
+                                tags$ul(
+                                  tags$li("Interactive map for location selection"),
+                                  tags$li("Monthly raw data distributions for temperature and precipitation"),
+                                  tags$li("Yearly data distribution for temperature and precipitation"),
+                                  tags$li("Trend visualizations for temperature and precipitation"),
+                                  tags$li("Regression modeling and comparisons across sites")
+                                ))),
+                        div(class = "collapsible-container",
+                            div(class = "collapsible-header", "   👥    Contributors 🔽"),
+                            div(class = "collapsible-body",
+                                tags$ul(
+                                  tags$li(strong("Anish Bhattarai"), " – Graduate Research Assistant, Integrative Precison Ag, Department of Crop and Soil Science"),
+                                  tags$li(strong("Dr. Gonzalo Scarpin"), " - Post-Doctoral Research Fellow, Integrative Precison Ag, Department of Crop and Soil Science"),
+                                  tags$li(strong("Kriti Poudel"), " - Graduate Research Assistant, Integrative Precison Ag, Department of Crop and Soil Science"),
+                                  tags$li(strong("Amrinder Jakhar"), " - Graduate Research Assistant, Integrative Precison Ag, Department of Crop and Soil Science"),
+                                  tags$li(strong("Dr. Leonardo M. Bastos"), " – Assistant Professor, Integrative Precison Ag, UGA Crop & Soil Sciences")
+                                ))),
+                        h3("   📚    Data Source"),
+                        p("Data are derived from the Daymet gridded daily weather dataset."),
+                        br()
+                      )
+             )
+  ),
+  navbarMenu("REC Distribution",
+             tabPanel("Distribution",
+                      fluidPage(
+                        sidebarLayout(
+                          sidebarPanel(
+                            h4("Maps"),
+                            h6("The location are clickable, click on each of them to explore more",
+                               style = "background-color: yellow; padding: 6px; border-radius: 5px;"),
+                            selectInput(inputId = "variable", label = "Select Variables:", choices = c("Precipitation", "Temperature", "Proximity"), selected = "Precipitation"),
+                            leafletOutput("rec_maps", height = 550),
+                            actionButton("zoom_out_rec_dist", "Zoom Out", icon = icon("search-minus"))
+                          ),
+                          mainPanel(
+                            tabsetPanel(id = "tabs_rec_dist",
+                                        tabPanel(title = "Distribution", value = "dist",
+                                                 h4(textOutput("dist_title")),
+                                                 conditionalPanel(
+                                                   condition = "input.variable != 'Proximity'",
+                                                   plotOutput("density_dist_plot"),
+                                                   uiOutput("selected_loc_rec_dist") # Changed to uiOutput
+                                                 ),
+                                                 conditionalPanel(
+                                                   condition = "input.variable == 'Proximity'",
+                                                   sliderInput("distance_threshold", "Select distance (miles)",
+                                                               min = 0, max = 100, value = 0, step = 5),
+                                                   uiOutput("proximity_progress_ui") # Changed: New UI for progress circle
+                                                 )
+                                        )
+                            )
+                          )
+                        )
+                      )
+             )
+  ),
+  navbarMenu("Climate",
+             tabPanel("Data",
+                      fluidPage(
+                        sidebarLayout(
+                          sidebarPanel(
+                            leafletOutput("climate_map", height = 350),
+                            selectInput("climate_variable", "Select Variable:", choices = c("Precipitation", "Temperature")),
+                            uiOutput("location_ui"),
+                            conditionalPanel(
+                              condition = "input.tabs_climate === 'raw_density'",
+                              selectInput("month_filter", "Zoom to Month:", choices = c("All", levels(data$month)), selected = "All")
+                            ),
+                            actionButton("zoom_out_climate", "Zoom Out", icon = icon("search-minus")),
+                            br(), br(),
+                            tags$div(style = "background: #f7f7f7; border-radius: 10px; padding: 10px; text-align: center;",
+                                     strong("Selected Location(s):"),
+                                     textOutput("selected_label_climate", inline = TRUE))
+                          ),
+                          mainPanel(
+                            tabsetPanel(id = "tabs_climate",
+                                        tabPanel("   📆    Monthly Summary", value = "raw_density", plotOutput("monthly_summary_plot", height = 1000)),
+                                        tabPanel("∑ Yearly Summary", value = "trend",
+                                                 plotOutput("yearly_summary_plot"),
+                                                 uiOutput("info_cards_climate")),
+                                        tabPanel("   📈    Trend", value = "regression", plotOutput("regression_plot")),
+                                        tabPanel("   📊    Comparison", value = "comparison", plotOutput("comparison_plot"))
+                            )
+                          )
+                        )
+                      )
+             )
+  ),
+  navbarMenu("Soil",
+             tabPanel("Data",
+                      fluidPage(
+                        sidebarLayout(
+                          sidebarPanel(
+                            h4("Soil Maps"),
+                            h6("The location are clickable, click on each of them to explore more",
+                               style = "background-color: yellow; padding: 6px; border-radius: 5px;"),
+                            selectInput(inputId = "soil_variable", label = "Select Variables:", choices = c("Sand (%)", "Silt (%)", "Clay (%)", "Textural Class"), selected = "Sand (%)"),
+                            leafletOutput("soil_maps", height = 550),
+                            actionButton("zoom_out_soil", "Zoom Out", icon = icon("search-minus"))
+                          ),
+                          mainPanel(
+                            tabsetPanel(id = "tabs_soil",
+                                        tabPanel(title = "Distribution", value = "dist_soil",
+                                                 h4(textOutput("dist_title_soil")),
+                                                 conditionalPanel(
+                                                   condition = "input.soil_variable != 'Textural Class'",
+                                                   plotOutput("density_dist_soil_plot"),
+                                                   uiOutput("selected_loc_soil"), # Changed to uiOutput
+                                                   uiOutput("info_cards_soil")),
+                                                 conditionalPanel(
+                                                   condition = "input.soil_variable == 'Textural Class'",
+                                                   plotOutput("triangle_plot", height = "700px"),
+                                                   uiOutput("info_cards_soil")
+                                                 )
+                                        )
+                            )
+                          )
+                        )
+                      )
+             )
+  ),
+  navbarMenu("By RECs",
+             tabPanel("REC Profiles",
+                      fluidPage(
+                        sidebarLayout(
+                          sidebarPanel(
+                            h4("   📍    Click on a REC to View Profile"),
+                            leafletOutput("rec_profile_map", height = 500),
+                            width = 4 # Changed width to 4 for more main panel space
+                          ),
+                          mainPanel(
+                            h3("   🏷️    REC Profile Summary"),
+                            uiOutput("rec_profile_cards") # Changed ID to plural for multiple cards
+                          )
+                        )
+                      )
+             )
+  )
+)
+# --- Server Logic ---
+server <- function(input, output, session) {
+  # Reactive values for tracking clicked locations across different map tabs
+  clicked_loc_rec_dist <- reactiveVal(NULL)
+  clicked_loc_soil <- reactiveVal(NULL)
+  selected_profile_rec <- reactiveVal(NULL) # For 'By RECs' tab
+  selected_climate_location <- reactiveVal(NULL) # New: For Climate tab location persistence
+  
+  # --- Helper Functions ---
+  # Function to generate dynamic color palette
+  location_colors <- colorFactor(
+    palette = rev(RColorBrewer::brewer.pal(10, "Paired")),
+    domain = location_data$loc
+  )
+  
+  # Base map rendering function
+  render_base_leaflet_map <- function(map_id) {
+    leaflet() %>%
+      addProviderTiles("CartoDB.Positron") %>%
+      addPolygons(data = georgia_boundary, fillColor = "transparent", color = "black", weight = 2) %>%
+      setView(lng = -82, lat = 32.7, zoom = 6)
+  }
+  
+  # --- Lazy Loading Reactive Data Sources ---
+  # These reactive expressions ensure that large datasets are loaded only once
+  # per user session when they are first needed by a plot or calculation.
+  
+  # Climate Data
+  climate_data_raw <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "ppt_raw_ga.rds")) %>% rename(value = 1)
+  })
+  
+  climate_recs_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "ppt_recs.rds")) %>% rename(value = 1)
+  })
+  
+  # New: Reactive for raw temperature data
+  temp_raw_ga_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "temp_raw_ga.rds")) %>% rename(value = 1)
+  })
+  
+  # New: Reactive for REC temperature data
+  temp_recs_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "temp_recs.rds")) %>% rename(value = 1)
+  })
+  
+  # Climate raster data for REC Distribution tab
+  temp_prism_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "ga_tmean_30yrs_norms.rds"))
+  })
+  
+  ppt_prism_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "ga_ppt_30yrs_norms.rds"))
+  })
+  
+  proximity_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "ga_counties_proximity_rast.rds")) %>%
+      st_transform(crs = 4326) %>%
+      dplyr::select(name, dist_m, geometry)
+  })
+  
+  # Soil Data
+  sand_ga_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "02_ga_counties_texture.rds")) %>%
+      st_transform(crs = 4326) %>%
+      dplyr::select(county, value = sandtotal_r, geometry)
+  })
+  
+  silt_ga_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "02_ga_counties_texture.rds")) %>%
+      st_transform(crs = 4326) %>%
+      dplyr::select(county, value = silttotal_r, geometry)
+  })
+  
+  clay_ga_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "02_ga_counties_texture.rds")) %>%
+      st_transform(crs = 4326) %>%
+      dplyr::select(county, value = claytotal_r, geometry)
+  })
+  
+  sand_recs_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "03_recs_soil_dist.rds")) %>%
+      st_transform(crs = 4326) %>%
+      dplyr::select(4, value = sandtotal_r, geometry)
+  })
+  
+  silt_recs_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "03_recs_soil_dist.rds")) %>%
+      st_transform(crs = 4326) %>%
+      dplyr::select(4, value = silttotal_r, geometry)
+  })
+  
+  clay_recs_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "03_recs_soil_dist.rds")) %>%
+      st_transform(crs = 4326) %>%
+      dplyr::select(4, value = claytotal_r, geometry)
+  })
+  
+  # Soil texture triangle data
+  triangle_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "03_recs_soil_dist.rds")) %>%
+      st_drop_geometry() %>%
+      rename(SAND = 1, SILT = 2, CLAY = 3) %>%
+      dplyr::select(3, 2, 1, 4) %>%
+      mutate_at(.vars = c(1, 2, 3), .funs = ~round(., 1)) %>%
+      mutate(total = CLAY + SILT + SAND) %>%
+      mutate(
+        CLAY = round(CLAY / total * 100, 1),
+        SILT = round(SILT / total * 100, 1),
+        SAND = round(SAND / total * 100, 1)
+      ) %>%
+      dplyr::select(-total)
+  })
+  
+  class_poly_data <- reactive({
+    readRDS(paste0(CLOUD_DATA_BASE_URL, "class_poly_USDA.rds"))
+  })
+  
+  label_centroids_data <- reactive({
+    class_poly_data() %>% # Depends on class_poly_data
+      group_by(group) %>%
+      summarise(
+        SAND = mean(SAND),
+        SILT = mean(SILT),
+        CLAY = mean(CLAY),
+        LABEL = unique(group),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        LABEL_SHORT = case_when(
+          LABEL == "clay" ~ "Cl",
+          LABEL == "silty clay" ~ "SiCl",
+          LABEL == "sandy clay" ~ "SaCl",
+          LABEL == "clay loam" ~ "ClLo",
+          LABEL == "silty clay loam" ~ "SiClLo",
+          LABEL == "sandy clay loam" ~ "SaClLo",
+          LABEL == "loam" ~ "Lo",
+          LABEL == "silt loam" ~ "SiLo",
+          LABEL == "silt" ~ "Si",
+          LABEL == "sandy loam" ~ "SaLo",
+          LABEL == "loamy sand" ~ "LoSa",
+          LABEL == "sand" ~ "Sa",
+          TRUE ~ LABEL
+        )
+      )
+  })
+  
+  
+  # --- REC Distribution Tab Logic ---
+  observeEvent(input$rec_maps_marker_click, {
+    click_id <- input$rec_maps_marker_click$id
+    selected_value <- NULL
+    
+    if (input$variable == "Temperature") {
+      selected_value <- rec_summary %>% filter(loc == click_id) %>% pull(value.x) # Use value.x for temp
+    } else if (input$variable == "Precipitation") {
+      selected_value <- rec_summary %>% filter(loc == click_id) %>% pull(value.y) # Use value.y for ppt
+    } else if (input$variable == "Proximity") {
+      # Proximity value for individual REC points is not directly in rec_summary.
+      # Displaying NA for now, as specific point proximity is not pre-calculated for RECs here.
+      selected_value <- NA
+    }
+    clicked_loc_rec_dist(list(loc = click_id, value = selected_value))
+  })
+  
+  observeEvent(input$variable, {
+    clicked_loc_rec_dist(NULL) # Clear selection when variable changes
+  })
+  
+  output$dist_title <- renderText({
+    switch(input$variable,
+           "Temperature" = "Temperature Distribution (°C)",
+           "Precipitation" = "Precipitation Distribution (mm)",
+           "Proximity" = "Proximity to Station Distribution (miles)")
+  })
+  
+  # Reactive for raster data based on selected variable
+  raster_data_rec_dist <- reactive({
+    req(input$variable) # Ensure input$variable is available
+    if (input$variable == "Temperature") {
+      temp_prism_data() # Call the reactive for lazy loading
+    } else if (input$variable == "Precipitation") {
+      ppt_prism_data() # Call the reactive for lazy loading
+    } else if (input$variable == "Proximity") {
+      proximity_data() # Call the reactive for lazy loading
+    }
+  })
+  
+  # Reactive for legend title
+  legend_title_rec_dist <- reactive({
+    switch(input$variable,
+           "Temperature" = "Temperature (°C)",
+           "Precipitation" = "Precipitation (mm)",
+           "Proximity" = "Distance (miles)")
+  })
+  
+  # Reactive for legend breaks
+  legend_breaks_rec_dist <- reactive({
+    if (input$variable == "Temperature") {
+      seq(10, 25, by = 2.5)
+    } else if (input$variable == "Precipitation") {
+      seq(1000, 2500, by = 250)
+    } else if (input$variable == "Proximity") {
+      req(proximity_data()) # Ensure proximity data is loaded before calculating max
+      
+      dist_values <- proximity_data()$dist_m
+      
+      # Handle case where dist_values might be empty or all NAs
+      if (length(dist_values) == 0 || all(is.na(dist_values))) {
+        return(c(0, 1)) # Provide a default range if no valid distances
+      }
+      
+      max_dist <- max(dist_values, na.rm = TRUE)
+      
+      # Ensure max_dist is a finite number and greater than 0, otherwise provide a reasonable default
+      if (!is.finite(max_dist) || max_dist <= 0) {
+        return(c(0, 1)) # Fallback to a small default range if max_dist is problematic
+      }
+      
+      step_size <- max(1, round(max_dist / 5)) # Ensure step size is at least 1, prevent zero step
+      seq(0, max_dist, by = step_size) # Dynamically calculate breaks
+    }
+  })
+  
+  # Reactive for color palette
+  palette_rec_dist <- reactive({
+    req(raster_data_rec_dist()) # Ensure raster data is loaded
+    if (input$variable == "Proximity") {
+      colorNumeric(
+        palette = viridis::viridis(length(legend_breaks_rec_dist()), option = "magma", direction = 1),
+        domain = raster_data_rec_dist()$dist_m,
+        na.color = "transparent"
+      )
+    } else {
+      colorBin(
+        palette = viridis::viridis(length(legend_breaks_rec_dist()), option = "plasma"),
+        domain = values(raster_data_rec_dist()),
+        bins = legend_breaks_rec_dist(),
+        na.color = "transparent"
+      )
+    }
+  })
+  
+  # Reactive for counties within distance (for Proximity variable)
+  counties_within_distance <- reactive({
+    req(input$variable == "Proximity", input$distance_threshold, proximity_data()) # Ensure data is loaded
+    proximity_data() %>%
+      mutate(dist_miles = dist_m) %>%
+      filter(dist_miles <= input$distance_threshold)
+  })
+  
+  # Render progress circle for proximity
+  output$proximity_progress_ui <- renderUI({
+    req(input$variable == "Proximity", proximity_data())
+    
+    total_counties <- nrow(proximity_data())
+    within_counties_count <- nrow(counties_within_distance())
+    
+    percentage <- 0
+    if (total_counties > 0) {
+      percentage <- round((within_counties_count / total_counties) * 100, 1)
+    }
+    
+    div(class = "progress-circle-container",
+        div(class = "progress-circle", style = paste0("--percentage:", percentage, "%"),
+            div(class = "progress-inner-circle", # New div for inner circle and text
+                span(class = "progress-value", paste0(percentage, "%"))
+            )
+        ),
+        div(class = "progress-text", paste0(within_counties_count, " out of ", total_counties, " counties"))
+    )
+  })
+  
+  # Render initial REC distribution map
+  output$rec_maps <- renderLeaflet({
+    render_base_leaflet_map("rec_maps")
+  })
+  
+  # Observe and update REC distribution map
+  observe({
+    req(input$variable, raster_data_rec_dist()) # Ensure variable and raster data are available
+    pal <- palette_rec_dist()
+    proxy <- leafletProxy("rec_maps") %>%
+      clearImages() %>%
+      clearShapes() %>%
+      clearControls()
+    if (input$variable == "Proximity") {
+      within_counties <- counties_within_distance()
+      proxy %>%
+        addPolygons(data = georgia_boundary, fillColor = "transparent", color = "black", weight = 2, group = "State") %>%
+        addPolygons(data = proximity_data(), fillColor = ~pal(dist_m), group = "Proximity", color = "black", weight = 0.25, fillOpacity = 1) %>%
+        addPolygons(data = within_counties, fillColor = "transparent", color = "green", weight = 2, fillOpacity = 0.9, group = "Highlighted") %>%
+        addPolygons(data = ga_counties, fillColor = "transparent", group = "Counties", color = "black", weight = 0.13, label = ~NAME)
+    } else {
+      proxy %>%
+        addPolygons(data = georgia_boundary, fillColor = "transparent", color = "black", weight = 2) %>%
+        addRasterImage(raster_data_rec_dist(), colors = pal, opacity = 1)
+    }
+    proxy %>%
+      addLegend(pal = pal,
+                values = if(input$variable == "Proximity") proximity_data()$dist_m else values(raster_data_rec_dist()),
+                title = legend_title_rec_dist(),
+                position = "bottomright", opacity = 0.5) %>%
+      addCircleMarkers(data = location_data, lat = ~lat, lng = ~lon, layerId = ~loc, label = ~loc,
+                       radius = 4.5, fillColor = ~location_colors(location_data$loc), color = "black", stroke = TRUE, weight = 1.5,
+                       fillOpacity = 1)
+  })
+  outputOptions(output, "rec_maps", suspendWhenHidden = FALSE)
+  
+  observeEvent(input$zoom_out_rec_dist, {
+    leafletProxy("rec_maps") %>% flyTo(lng = -82, lat = 32.7, zoom = 6)
+  })
+  
+  # Generic Density Plot (used for both Climate and Soil)
+  render_density_plot_func <- function(df_raw, df_recs, selected_loc_data, title, breaks, loc_colors_func) {
+    # Generate named color vector for ggplot
+    loc_levels <- levels(factor(df_recs$loc))
+    loc_colors <- setNames(loc_colors_func(loc_levels), loc_levels)
+    
+    selected_loc <- selected_loc_data$loc
+    selected_value <- selected_loc_data$value
+    
+    # Set transparency for vlines
+    df_recs$alpha <- if (!is.null(selected_loc)) {
+      ifelse(df_recs$loc == selected_loc, 1, 0.10)
+    } else {
+      0.65
+    }
+    
+    p <- ggplot(data = df_raw, aes(x = value)) +
+      ggridges::geom_density_ridges_gradient(aes(y = 1, fill = after_stat(x)), scale = 3) +
+      scale_fill_viridis_c(option = "H") +
+      geom_vline(data = df_recs, aes(xintercept = value, color = loc, alpha = alpha),
+                 linetype = 2, size = 1, lwd = 1.4 ) +
+      scale_color_manual(values = loc_colors) +
+      scale_alpha_identity() +
+      scale_x_continuous(breaks = breaks) +
+      labs(x = title,
+           y = "Density",
+           title = selected_loc)+
+      theme_minimal() +
+      theme(
+        plot.title = element_text(colour = if (!is.null(selected_loc)) loc_colors[[selected_loc]] else "black", face = "bold", size = 15),
+        legend.position = "none",
+        panel.background = element_rect(fill = "#f0f0f0"),
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 12)
+      )
+    
+    p
+  }
+  
+  output$density_dist_plot <- renderPlot({
+    req(input$variable) # Ensure input$variable is available
+    
+    # Use the lazy-loaded reactive data sources for efficiency
+    if (input$variable == "Precipitation") {
+      df_raw <- climate_data_raw()
+      df_recs <- climate_recs_data()
+    } else if (input$variable == "Temperature") {
+      df_raw <- temp_raw_ga_data()
+      df_recs <- temp_recs_data()
+    } else {
+      return(NULL) # Proximity variable does not use this plot
+    }
+    
+    title <- legend_title_rec_dist()
+    breaks <- if (input$variable == "Temperature") seq(10, 25, by = 2.5) else seq(1000, 2500, by = 100)
+    render_density_plot_func(df_raw, df_recs, clicked_loc_rec_dist(), title, breaks, location_colors)
+  })
+  
+  output$selected_loc_rec_dist <- renderUI({ # Changed to renderUI
+    loc_name <- clicked_loc_rec_dist()$loc
+    var_value <- clicked_loc_rec_dist()$value # This will be set in the click observer
+    var_unit <- switch(input$variable,
+                       "Temperature" = "°C",
+                       "Precipitation" = "mm",
+                       "Proximity" = "miles",
+                       "")
+    
+    if (!is.null(loc_name) && !is.na(var_value)) { # Check for NA in var_value
+      HTML(paste0("Selected location: ", loc_name, "<br/>(Value: ", round(var_value, 1), " ", var_unit, ")"))
+    } else if (!is.null(loc_name)) {
+      HTML(paste("Selected location:", loc_name))
+    } else {
+      HTML("No location selected")
+    }
+  })
+  
+  # --- Climate Tab Logic ---
+  # Observe climate map marker clicks to update selected_climate_location
+  observeEvent(input$climate_map_marker_click, {
+    click_id <- input$climate_map_marker_click$id
+    selected_climate_location(click_id)
+  })
+  
+  # Observe changes in the location input (dropdown/checkbox) to update selected_climate_location
+  observeEvent(input$location, {
+    selected_climate_location(input$location)
+  })
+  
+  # Dynamic location input UI (checkbox or select depending on tab)
+  output$location_ui <- renderUI({
+    # Use the value from selected_climate_location reactiveVal for persistence
+    current_selection <- selected_climate_location()
+    
+    if (input$tabs_climate == "comparison") {
+      # For checkboxGroupInput, ensure current_selection is a vector
+      if (is.null(current_selection)) {
+        checkboxGroupInput("location", "Select Location(s):", choices = unique(data$loc), selected = unique(data$loc)[1])
+      } else {
+        checkboxGroupInput("location", "Select Location(s):", choices = unique(data$loc), selected = current_selection)
+      }
+    } else {
+      # For selectInput, ensure current_selection is a single value
+      if (is.null(current_selection) || length(current_selection) > 1) { # If multiple selected previously, default to first
+        selectInput("location", "Select Location:", choices = unique(data$loc), selected = unique(data$loc)[1])
+      } else {
+        selectInput("location", "Select Location:", choices = unique(data$loc), selected = current_selection)
+      }
+    }
+  })
+  
+  # Render initial climate map
+  output$climate_map <- renderLeaflet({
+    render_base_leaflet_map("climate_map")
+  })
+  
+  # Observe and update climate map markers
+  observe({
+    locs <- if (is.character(selected_climate_location())) selected_climate_location() else unlist(selected_climate_location())
+    # Ensure locs is not NULL or empty for initial rendering if selected_climate_location() is still NULL
+    if (is.null(locs) || length(locs) == 0) {
+      locs <- unique(location_data$loc)[1] # Default to first location if nothing selected yet
+    }
+    
+    leafletProxy("climate_map") %>%
+      clearMarkers() %>%
+      addCircleMarkers(data = location_data,
+                       lat = ~lat, lng = ~lon, label = ~loc, layerId = ~loc,
+                       radius = 5, color = "darkgreen",
+                       fillColor = ifelse(location_data$loc %in% locs, "red", "lightgreen"),
+                       fillOpacity = 0.8, stroke = TRUE)
+  })
+  
+  # Fly to selected location (single only) - now uses selected_climate_location
+  observeEvent(selected_climate_location(), {
+    loc <- location_data %>% filter(loc %in% selected_climate_location())
+    if (nrow(loc) == 1) {
+      leafletProxy("climate_map") %>% flyTo(lng = loc$lon[1], lat = loc$lat[1], zoom = 6.3)
+    }
+  })
+  
+  observeEvent(input$zoom_out_climate, {
+    leafletProxy("climate_map") %>% flyTo(lng = -83.5, lat = 32.9, zoom = 6)
+  })
+  
+  output$selected_label_climate <- renderText({ paste(selected_climate_location(), collapse = ", ") })
+  
+  # Shared colors for climate plots
+  dynamic_colors_climate <- reactive({
+    req(selected_climate_location())
+    locs <- if (is.character(selected_climate_location())) selected_climate_location() else unlist(selected_climate_location())
+    location_colors(unique(locs))
+  })
+  
+  output$monthly_summary_plot <- renderPlot({
+    req(selected_climate_location()) # Use selected_climate_location()
+    df <- data %>% filter(loc %in% selected_climate_location())
+    if (input$month_filter != "All") {
+      df <- df %>% filter(month == input$month_filter)
+    }
+    title_text <- if (input$month_filter == "All") {
+      paste("Monthly", input$climate_variable, "Distribution by Year")
+    } else {
+      paste(input$climate_variable, "for", input$month_filter)
+    }
+    
+    if (input$climate_variable == "Temperature") {
+      p <- ggplot(df, aes(x = tmax_deg_c, y = factor(year), fill = ..x..)) +
+        stat_density_ridges(geom = "density_ridges_gradient", # Changed geom for better rendering
+                            calc_ecdf = TRUE,
+                            quantile_lines = TRUE, quantiles = 2, bandwidth = 1) +
+        scale_fill_viridis_c(option = "C") +
+        labs(x = "Temperature (°C)", y = "Year", title = title_text) +
+        theme_ipsum() +
+        theme(legend.position = "none")
+      if (input$month_filter == "All") {
+        p <- p + facet_wrap(~month)
+      }
+    } else { # Precipitation
+      df_cum <- df %>%
+        group_by(year, month) %>%
+        mutate(cum_prcp = sum(prcp_mm_day, na.rm = TRUE), .groups = "drop")
+      df_med <- df_cum %>%
+        group_by(month) %>%
+        summarise(med_prcp = mean(cum_prcp, na.rm = TRUE), .groups = "drop")
+      
+      p <- ggplot() +
+        geom_col(data = df_cum, aes(x = factor(year), y = cum_prcp, fill = cum_prcp), position = position_dodge()) +
+        geom_hline(data = df_med, aes(yintercept = med_prcp), linetype = 2, color = "red")+
+        labs(title = title_text, x = "Year", y = "Cumulative Precipitation (mm)", fill = "Cumulative \nPrecipitation (mm)") +
+        facet_wrap(~month)+
+        theme_minimal()+
+        theme(axis.text.x = element_text(angle = 90, size = 6.5),
+              axis.text.y = element_text(size = 10),
+              plot.title = element_text(size = 18, face = "bold"),
+              axis.title = element_text(size = 16, face = "bold"))
+      if (input$month_filter != "All") {
+        p <- p + ggtitle(paste("Cumulative Precipitation in", input$month_filter))+theme(axis.text = element_text(angle = 90, size = 14),
+                                                                                         legend.position = "none",
+                                                                                         plot.title = element_text(size = 14, face = "bold"),
+                                                                                         axis.title = element_text(size = 16, face = "bold"))
+      }
+    }
+    p
+  })
+  
+  output$yearly_summary_plot <- renderPlot({
+    req(selected_climate_location()) # Use selected_climate_location()
+    trend_df <- data %>% filter(loc %in% selected_climate_location())
+    if (input$climate_variable == "Precipitation") {
+      trend_df <- trend_df %>%
+        group_by(loc, year) %>%
+        summarise(value = sum(prcp_mm_day, na.rm = TRUE), .groups = "drop")
+      p <- ggplot(trend_df, aes(x = year, y = value)) +
+        geom_line(color = "blue") + geom_point(color = "blue") +
+        labs(x = "Year", y = "Cumulative Precipitation (mm)", title = paste("Yearly", input$climate_variable, "Trend of", selected_climate_location()), color = "Location") +
+        theme_minimal()+
+        theme(legend.position = "none",
+              plot.title = element_text(size = 18, face = "bold"),
+              axis.text = element_text(size = 12),
+              axis.title = element_text(size = 16, face = "bold"))
+    } else { # Temperature
+      trend_df <- trend_df %>%
+        filter(yday >= 91, yday <= 273) %>% # Approx. April 1 to Sept 30
+        group_by(loc, year) %>%
+        summarise(value = mean((tmax_deg_c + tmin_deg_c)/2, na.rm = TRUE), .groups = "drop")
+      p <- ggplot(data = trend_df, aes(x = year, y = value)) +
+        geom_line(color = "red") + geom_point(color = "red") +
+        labs(x = "Year",
+             y = "Average Temperature (°C)",
+             title = paste("Yearly", input$climate_variable, "Trend of", selected_climate_location()),
+             color = "Location") +
+        theme_minimal()+
+        theme(legend.position = "none",
+              plot.title = element_text(size = 14, face = "bold"),
+              axis.title = element_text(size = 18, face = "bold"),
+              axis.text = element_text(size = 15))
+    }
+    p
+  })
+  
+  # Helper for info cards
+  render_climate_info_card <- function(title, value, unit, year) {
+    div(class = "info-card",
+        h4(title),
+        p(paste("Value:", paste0(round(value, 1), " ", unit))),
+        p(paste("Year:", year))
+    )
+  }
+  
+  output$info_cards_climate <- renderUI({
+    req(input$climate_variable)
+    if (input$climate_variable == "Temperature") {
+      fluidRow(
+        column(6, uiOutput("max_temp_card")),
+        column(6, uiOutput("min_temp_card"))
+      )
+    } else {
+      fluidRow(
+        column(6, uiOutput("max_prcp_card")),
+        column(6, uiOutput("min_prcp_card"))
+      )
+    }
+  })
+  
+  output$max_temp_card <- renderUI({
+    req(selected_climate_location(), input$climate_variable == "Temperature")
+    df <- data %>%
+      filter(loc %in% selected_climate_location(), yday >= 91, yday <= 273) %>%
+      group_by(year) %>%
+      summarise(avg_temp = mean((tmax_deg_c + tmin_deg_c)/2, na.rm = TRUE)) %>%
+      slice_max(avg_temp, n = 1)
+    render_climate_info_card("Max Temperature", df$avg_temp, "°C", df$year)
+  })
+  
+  output$min_temp_card <- renderUI({
+    req(selected_climate_location(), input$climate_variable == "Temperature")
+    df <- data %>%
+      filter(loc %in% selected_climate_location(), yday >= 91, yday <= 273) %>%
+      group_by(year) %>%
+      summarise(avg_temp = mean((tmax_deg_c + tmin_deg_c)/2, na.rm = TRUE)) %>%
+      slice_min(avg_temp, n = 1)
+    render_climate_info_card("Min Temperature", df$avg_temp, "°C", df$year)
+  })
+  
+  output$max_prcp_card <- renderUI({
+    req(selected_climate_location(), input$climate_variable == "Precipitation")
+    df <- data %>%
+      filter(loc %in% selected_climate_location()) %>%
+      group_by(year) %>%
+      summarise(cum_prcp = sum(prcp_mm_day, na.rm = TRUE)) %>%
+      slice_max(cum_prcp, n = 1)
+    render_climate_info_card("Max Precipitation", df$cum_prcp, "mm", df$year)
+  })
+  
+  output$min_prcp_card <- renderUI({
+    req(selected_climate_location(), input$climate_variable == "Precipitation")
+    df <- data %>%
+      filter(loc %in% selected_climate_location()) %>%
+      group_by(year) %>%
+      summarise(cum_prcp = sum(prcp_mm_day, na.rm = TRUE)) %>%
+      slice_min(cum_prcp, n = 1)
+    render_climate_info_card("Min Precipitation", df$cum_prcp, "mm", df$year)
+  })
+  
+  regression_data <- reactive({
+    req(selected_climate_location())
+    if (input$month_filter == "All") {
+      data_filtered <- data %>% filter(loc %in% selected_climate_location())
+      data_filtered %>%
+        group_by(year, loc) %>%
+        summarise(
+          cum_prcp = sum(prcp_mm_day, na.rm = TRUE),
+          avg_temp = mean((tmax_deg_c + tmin_deg_c) / 2, na.rm = TRUE),
+          .groups = "drop"
+        )
+    } else {
+      data %>%
+        filter(loc %in% selected_climate_location(), month == input$month_filter) %>%
+        group_by(year, loc) %>%
+        summarise(
+          cum_prcp = sum(prcp_mm_day, na.rm = TRUE),
+          avg_temp = mean((tmax_deg_c + tmin_deg_c) / 2, na.rm = TRUE),
+          .groups = "drop"
+        ) %>%
+        mutate(month = input$month_filter)
+    }
+  })
+  
+  output$regression_plot <- renderPlot({
+    req(selected_climate_location())
+    reg_df <- regression_data()
+    title_text <- if (input$month_filter == "All") {
+      if (input$climate_variable == "Precipitation") {
+        paste("Yearly Cumulative Precipitation Regression of", selected_climate_location())
+      } else {
+        paste("Yearly Average Temperature Regression of", selected_climate_location())
+      }
+    } else {
+      paste(input$climate_variable, "Regression for", input$month_filter)
+    }
+    
+    if (input$climate_variable == "Precipitation") {
+      p <- ggplot(reg_df, aes(x = year, y = cum_prcp, color = loc)) +
+        geom_point(alpha = 0.4, color = "blue") +
+        geom_smooth(method = "lm", se = TRUE, color = "blue") +
+        stat_poly_line(color = "blue")+
+        stat_poly_eq(use_label(labels = "eq"), size = 5, color = "blue")+
+        scale_color_manual(values = dynamic_colors_climate()) +
+        labs(title = title_text, x = "Year", y = "Cumulative Precipitation (mm)", color = "Location") +
+        theme_minimal()+
+        theme(legend.position = "none",
+              plot.title = element_text(size = 18, face = "bold"),
+              axis.text = element_text(size = 12),
+              axis.title = element_text(size = 16, face = "bold"))
+    } else { # Temperature
+      p <- ggplot(reg_df, aes(x = year, y = avg_temp, color = loc)) +
+        geom_point(alpha = 0.4, color = "red") +
+        geom_smooth(method = "lm", se = TRUE, color = "red") +
+        stat_poly_line(color = "red")+
+        stat_poly_eq(use_label(labels = "eq"), size = 5, color = "red")+
+        scale_color_manual(values = dynamic_colors_climate()) +
+        labs(title = paste0("Yearly Average Temperature Regression of", selected_climate_location()),
+             x = "Year", y = "Average Temperature (°C)", color = "Location") +
+        theme_minimal()+
+        theme(legend.position = "none",
+              plot.title = element_text(size = 14, face = "bold"),
+              axis.title = element_text(size = 16, face = "bold"),
+              axis.text = element_text(size = 12))
+    }
+    p
+  })
+  
+  compare_data <- reactive({
+    req(selected_climate_location())
+    data %>%
+      filter(loc %in% selected_climate_location(), yday >= 91, yday <= 273) %>%
+      group_by(loc, year) %>%
+      summarise(cum_prcp = sum(prcp_mm_day, na.rm = TRUE),
+                avg_temp = mean((tmax_deg_c + tmin_deg_c)/2, na.rm = TRUE), .groups = "drop")
+  })
+  
+  output$comparison_plot <- renderPlot({
+    req(selected_climate_location())
+    compare_df <- compare_data()
+    if (input$climate_variable == "Precipitation") {
+      ggplot(compare_df, aes(x = year, y = cum_prcp, color = loc)) +
+        geom_point(alpha = 0.4) +
+        geom_smooth(method = "lm", se = TRUE) +
+        scale_color_manual(values = dynamic_colors_climate()) +
+        labs(title = "Comparison of Cumulative Precipitation", x = "Year", y = "Cumulative Precip (mm)", color = "Location(s)") +
+        theme_minimal() +
+        theme(panel.background = element_rect(fill = "#f0f0f0"),
+              plot.title = element_text(size = 18, face = "bold"),
+              axis.title = element_text(size = 18, face = "bold"),
+              axis.text = element_text(size = 12),
+              legend.position = "bottom")
+    } else { # Temperature
+      ggplot(compare_df, aes(x = year, y = avg_temp, color = loc)) +
+        geom_point(alpha = 0.4) +
+        geom_smooth(method = "lm", se = TRUE) +
+        scale_color_manual(values = dynamic_colors_climate()) +
+        labs(title = "Comparison of Avg Temperature", x = "Year", y = "Avg Temperature (°C)", color = "Location(s)") +
+        theme_minimal() +
+        theme(panel.background = element_rect(fill = "#f0f0f0"),
+              plot.title = element_text(size = 18, face = "bold"),
+              axis.title = element_text(size = 18, face = "bold"),
+              axis.text = element_text(size = 12),
+              legend.position = "bottom")
+    }
+  })
+  # --- Soil Tab Logic ---
+  observeEvent(input$soil_maps_marker_click, {
+    click_id <- input$soil_maps_marker_click$id
+    selected_value <- NULL
+    
+    if (input$soil_variable == "Sand (%)") {
+      selected_value <- rec_summary %>% filter(loc == click_id) %>% pull(sand)
+    } else if (input$soil_variable == "Silt (%)") {
+      selected_value <- rec_summary %>% filter(loc == click_id) %>% pull(silt)
+    } else if (input$soil_variable == "Clay (%)") {
+      selected_value <- rec_summary %>% filter(loc == click_id) %>% pull(clay)
+    } else if (input$soil_variable == "Textural Class") {
+      # For textural class, we don't have a single numerical value to display directly
+      selected_value <- NA
+    }
+    clicked_loc_soil(list(loc = click_id, value = selected_value))
+  })
+  
+  observeEvent(input$soil_variable, {
+    clicked_loc_soil(NULL) # Clear selection when variable changes
+  })
+  
+  output$dist_title_soil <- renderText({
+    switch(input$soil_variable,
+           "Sand (%)" = "Percentage Sand",
+           "Silt (%)" = "Percentage Silt",
+           "Clay (%)" = "Percentage Clay",
+           "Textural Class" = "USDA Textural Class")
+  })
+  
+  raster_data_soil <- reactive({
+    req(input$soil_variable) # Ensure input is available
+    switch(input$soil_variable,
+           "Sand (%)" = sand_ga_data(),
+           "Silt (%)" = silt_ga_data(),
+           "Clay (%)" = clay_ga_data(),
+           "Textural Class" = NULL)
+  })
+  
+  recs_raw_df <- reactive({
+    req(input$soil_variable) # Ensure input is available
+    switch(input$soil_variable,
+           "Sand (%)" = sand_recs_data(),
+           "Silt (%)" = silt_recs_data(),
+           "Clay (%)" = clay_recs_data()
+    )
+  })
+  
+  legend_title_soil <- reactive({
+    switch(input$soil_variable,
+           "Sand (%)" = "Percentage Sand",
+           "Silt (%)" = "Percentage Silt",
+           "Clay (%)" = "Percentage Clay",
+           "Textural Class" = "USDA Textural Class")
+  })
+  
+  legend_breaks_soil <- reactive({
+    if (input$soil_variable %in% c("Sand (%)", "Silt (%)", "Clay (%)")) {
+      seq(0, 100, by = 10)
+    } else {
+      NULL
+    }
+  })
+  
+  palette_soil <- reactive({
+    req(raster_data_soil()) # Ensure raster data is loaded
+    colorNumeric(
+      palette = viridis::viridis(length(legend_breaks_soil()), option = "magma", direction = 1),
+      domain = raster_data_soil()$value,
+      na.color = "transparent")
+  })
+  
+  # Render initial soil map
+  output$soil_maps <- renderLeaflet({
+    render_base_leaflet_map("soil_maps")
+  })
+  
+  # Observe and update soil map
+  observe({
+    req(input$soil_variable) # Ensure input is available
+    proxy_s <- leafletProxy("soil_maps") %>%
+      clearImages() %>%
+      clearShapes() %>%
+      clearControls() %>%
+      addPolygons(data = georgia_boundary, fillColor = "transparent", color = "black", weight = 2, group = "State") %>%
+      addPolygons(data = ga_counties, fillColor = "transparent", group = "Counties", color = "black", weight = 0.2, label = ~NAME)
+    
+    if(input$soil_variable != "Textural Class"){
+      req(raster_data_soil()) # Ensure raster data is loaded before using
+      pal_s <- palette_soil()
+      proxy_s %>%
+        addPolygons(data = raster_data_soil(), fillColor = ~pal_s(value), group = "Soil", color = "black", weight = 0.25, fillOpacity = 1) %>%
+        addLegend(pal = pal_s,
+                  values = raster_data_soil()$value,
+                  title = legend_title_soil(),
+                  position = "bottomright", opacity = 0.5)
+    }
+    
+    proxy_s %>%
+      addCircleMarkers(data = location_data, lat = ~lat, lng = ~lon, layerId = ~loc, label = ~loc,
+                       radius = 4.5, fillColor = ~location_colors(location_data$loc), color = "black", stroke = TRUE, weight = 1.5,
+                       fillOpacity = 1)
+  })
+  outputOptions(output, "soil_maps", suspendWhenHidden = FALSE)
+  
+  observeEvent(input$zoom_out_soil, {
+    leafletProxy("soil_maps") %>% flyTo(lng = -82, lat = 32.7, zoom = 6)
+  })
+  
+  output$density_dist_soil_plot <- renderPlot({
+    req(input$soil_variable)
+    if (input$soil_variable == "Textural Class") return(NULL)
+    req(raster_data_soil(), recs_raw_df()) # Ensure data is loaded
+    df_raw_soil <- raster_data_soil()
+    df_recs_soil <- recs_raw_df()
+    title_soil <- legend_title_soil()
+    breaks_soil <- seq(0, 100, by = 10)
+    render_density_plot_func(df_raw_soil, df_recs_soil, clicked_loc_soil(), title_soil, breaks_soil, location_colors)
+  })
+  
+  output$selected_loc_soil <- renderUI({ # Changed to renderUI
+    loc_name <- clicked_loc_soil()$loc
+    var_value <- clicked_loc_soil()$value # This will be set in the click observer
+    var_unit <- switch(input$soil_variable,
+                       "Sand (%)" = "%",
+                       "Silt (%)" = "%",
+                       "Clay (%)" = "%",
+                       "Textural Class" = "",
+                       "")
+    
+    if (!is.null(loc_name) && !is.na(var_value)) { # Check for NA in var_value
+      HTML(paste0("Selected location: ", loc_name, "<br/>(Value: ", round(var_value, 1), var_unit, ")"))
+    } else if (!is.null(loc_name)) {
+      HTML(paste("Selected location:", loc_name))
+    } else {
+      HTML("No location selected")
+    }
+  })
+  
+  output$triangle_plot <- renderPlot({
+    req(input$soil_variable == "Textural Class")
+    req(triangle_data(), class_poly_data(), label_centroids_data()) # Ensure all necessary data is loaded
+    triangle_recs <- triangle_data()
+    class_poly <- class_poly_data()
+    label_centroids <- label_centroids_data()
+    
+    loc_levels_t <- levels(factor(triangle_recs$loc))
+    loc_colors_t <- setNames(location_colors(loc_levels_t), loc_levels_t)
+    selected_t <- clicked_loc_soil()
+    
+    triangle_recs$alpha <- if (!is.null(selected_t)) {
+      ifelse(triangle_recs$loc == selected_t, 1, 0.15)
+    } else {
+      0.7
+    }
+    
+    ggtern(data = class_poly, aes(x = SAND, y = CLAY, z = SILT)) +
+      geom_polygon(aes(group = group), fill = "gray85", color = "black", alpha = 0.5) +
+      geom_text(data = label_centroids, aes(label = LABEL_SHORT),
+                size = 4.5, fontface = "bold", color = "black", alpha = 0.5) +
+      geom_point(data = triangle_recs,
+                 aes(x = SAND, y = CLAY, z = SILT, fill = loc, alpha = alpha),
+                 size = 4, shape = 21, color = "black") +
+      scale_fill_manual(values = loc_colors_t) +
+      labs(title = "USDA Soil Texture Triangle", color = "RECs",
+           T = "[%] Clay 0–2 µm", L = "[%] Sand 2–50 µm", R = "[%] Silt 50–2000 µm") +
+      ggtern::theme_rgbw() +
+      theme_showarrows() +
+      theme(legend.position = "bottom",
+            plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+            tern.axis.title.T = element_text(face = "bold", size = 12),
+            tern.axis.title.L = element_text(face = "bold", size = 12),
+            tern.axis.title.R = element_text(face = "bold", size = 12),
+            panel.grid.major = element_line(color = "gray80", linetype = "dotted"),
+            panel.grid.minor = element_line(color = "gray80", linetype = "dotted", linewidth = 0.3))
+  })
+  
+  # --- By RECs Tab Logic ---
+  # Render initial REC profile map
+  output$rec_profile_map <- renderLeaflet({
+    # Initialize with markers for the first location, which is also the default selected
+    initial_loc <- unique(location_data$loc)[1]
+    render_base_leaflet_map("rec_profile_map") %>%
+      addCircleMarkers(
+        data = location_data,
+        lat = ~lat, lng = ~lon, label = ~loc, layerId = ~loc,
+        radius = 5, color = "darkgreen",
+        fillColor = ~ifelse(loc == initial_loc, "red", "lightgreen"), # Highlight the initial selected location
+        fillOpacity = 0.8, stroke = TRUE
+      )
+  })
+  
+  # Update circle markers dynamically based on selected location(s)
+  observe({
+    locs <- if (is.character(input$location)) input$location else unlist(input$location)
+    leafletProxy("rec_profile_map") %>%
+      clearMarkers() %>%
+      addCircleMarkers(
+        data = location_data,
+        lat = ~lat, lng = ~lon, label = ~loc, layerId = ~loc,
+        radius = 5, color = "darkgreen",
+        fillColor = ~ifelse(loc %in% locs, "red", "lightgreen"),
+        fillOpacity = 0.8, stroke = TRUE
+      )
+  })
+  
+  # Fly to selected location (single only)
+  observeEvent(input$location, {
+    loc <- location_data %>% filter(loc %in% input$location)
+    if (nrow(loc) == 1) {
+      leafletProxy("rec_profile_map") %>% flyTo(lng = loc$lon[1], lat = loc$lat[1], zoom = 6.3)
+    }
+  })
+  
+  # Handle marker click to update input$location and selected_profile_rec
+  observeEvent(input$rec_profile_map_marker_click, {
+    click_rp <- input$rec_profile_map_marker_click
+    loc_rp <- click_rp$id
+    selected_profile_rec(loc_rp)
+    isolate({
+      updateSelectInput(session, "location", selected = loc_rp)
+      updateCheckboxGroupInput(session, "location", selected = loc_rp)
+    })
+  })
+  
+  # Zoom out button logic
+  observeEvent(input$zoom_out, {
+    leafletProxy("rec_profile_map") %>% flyTo(lng = -83.5, lat = 32.9, zoom = 6)
+  })
+  
+  outputOptions(output, "rec_profile_map", suspendWhenHidden = FALSE)
+  
+  # Display selected location label
+  output$selected_label <- renderText({ paste(input$location, collapse = ", ") })
+  
+  observeEvent(input$location, {
+    locs <- input$location
+    if (length(locs) == 1) {
+      selected_profile_rec(locs)
+    } else {
+      selected_profile_rec(NULL)
+    }
+  })
+  
+  # Changed: Separate info card sections for By RECs tab with collapsibility
+  output$rec_profile_cards <- renderUI({
+    loc_rp <- selected_profile_rec()
+    if (is.null(loc_rp)) {
+      return(tags$p("Click a location on the map to view REC details."))
+    }
+    rec <- rec_summary %>% filter(loc == !!loc_rp)
+    if (nrow(rec) == 0) {
+      return(tags$p("No data available for selected location."))
+    }
+    
+    tagList(
+      div(class = "collapsible-container",
+          div(class = "collapsible-header", "   ☁️    Weather Summary 🔽"),
+          div(class = "collapsible-body open", # Default to open
+              div(class = "info-card",
+                  h4(rec$loc),
+                  p(tags$b("Avg Temp:"), paste0(round(rec$value.x, 1), " °C")),
+                  p(tags$b("Avg Precip:"), paste0(round(rec$value.y, 1), " mm"))
+              )
+          )
+      ),
+      div(class = "collapsible-container",
+          div(class = "collapsible-header", "   🌱    Soil Composition 🔽"),
+          div(class = "collapsible-body open", # Default to open
+              div(class = "info-card",
+                  plotOutput("soil_composition_pie_chart")
+              )
+          )
+      )
+    )
+  })
+  
+  # Render pie chart for soil composition
+  output$soil_composition_pie_chart <- renderPlot({
+    loc_rp <- selected_profile_rec()
+    req(loc_rp) # Ensure a location is selected
+    
+    rec <- rec_summary %>% filter(loc == !!loc_rp)
+    req(nrow(rec) > 0) # Ensure data is available for the selected location
+    
+    # Prepare data for pie chart
+    pie_data <- data.frame(
+      component = c("Sand", "Silt", "Clay"),
+      percentage = c(rec$sand, rec$silt, rec$clay)
+    ) %>%
+      # Ensure percentages sum to 100 (handle potential rounding issues)
+      mutate(percentage = percentage / sum(percentage) * 100)
+    
+    # Define colors for the pie chart slices
+    pie_colors <- c("Sand" = "#D2B48C", # Light brown
+                    "Silt" = "#C0C0C0", # Gray
+                    "Clay" = "#A0522D") # Dark brown
+    
+    # Create the pie chart
+    ggplot(pie_data, aes(x = "", y = percentage, fill = component)) +
+      geom_bar(stat = "identity", width = 1, color = "white", size = 0.5) + # Add white border for separation
+      coord_polar("y", start = 0) +
+      # Add text labels inside the slices with black bold font
+      geom_text(aes(label = paste0(round(percentage, 1), "%")),
+                position = position_stack(vjust = 0.5),
+                color = "black", # Set text color to black
+                fontface = "bold", # Set font to bold
+                size = 5) + # Increased size for readability
+      scale_fill_manual(values = pie_colors) +
+      labs(title = paste("Soil Composition for", loc_rp),
+           caption = "Data source: Soil Survey Geographic Database (SSURGO)") + # Added caption
+      theme_void() + # Remove all background elements
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        legend.position = "bottom",
+        legend.title = element_blank(), # Remove legend title
+        plot.background = element_rect(fill = "transparent", color = NA), # Transparent background
+        panel.background = element_rect(fill = "transparent", color = NA), # Transparent panel background
+        plot.caption = element_text(hjust = 0.5, size = 10, face = "italic") # Style the caption
+      )
+  })
+}
+# Run App
+shinyApp(ui, server)
