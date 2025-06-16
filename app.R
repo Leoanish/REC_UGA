@@ -12,6 +12,7 @@ library(RColorBrewer)
 library(soiltexture)
 library(ggtern)
 library(ggpmisc)
+
 Sys.setenv("VROOM_CONNECTION_SIZE" = 131072 * 3) # Doubling the default, or choose a larger value
 
 # --- Data Loading and Preprocessing (Initial Load - essential for UI setup) ---
@@ -42,7 +43,8 @@ rec_summary <- location_data %>%
 
 # --- UI Definition ---
 ui <- navbarPage(
-  title = div("   🌤   UGA REC Climate Dashboard", style = "font-weight: bold; color: white;"),
+  id = "mainNavbar", # Added ID for programmatic tab switching
+  title = div("    🌤    UGA REC Climate Dashboard", style = "font-weight: bold; color: white;"),
   theme = shinytheme("flatly"),
   header = tags$head(
     # JavaScript for map resizing and collapsible sections
@@ -60,9 +62,62 @@ ui <- navbarPage(
         body.toggleClass('open');
         $(this).find('.arrow-icon').toggleClass('rotate'); // Toggle class on specific arrow span
       });
+
+      // Function to show a custom modal dialog (replaces alert/confirm)
+      function showConfirmModal(message, tabToRedirect, currentRecLocation) {
+        // No confirmation buttons, just redirects directly now
+        // This function is kept for structural consistency with previous version
+        // but now directly triggers the redirect without user confirmation.
+        Shiny.setInputValue('redirectTabRequest', { tab: tabToRedirect, location: currentRecLocation }, {priority: 'event'});
+      }
     ")),
     # Consolidated CSS styles
     tags$style(HTML("
+      /* General body and font */
+      html {
+        scroll-behavior: smooth; /* Smooth scrolling for navigation */
+      }
+      body {
+        font-family: 'Inter', sans-serif; /* A modern, clean sans-serif font */
+        background-color: #f8f9fa; /* Very light grey/off-white background */
+        color: #343a40; /* Darker text for readability */
+      }
+
+      /* Navbar */
+      .navbar {
+        background: linear-gradient(to right, #2c3e50, #4a688a); /* Darker, more sophisticated blue-grey gradient */
+        border-bottom: none; /* Remove harsh border */
+        box-shadow: 0 4px 10px rgba(0,0,0,0.1); /* Subtle shadow for depth */
+      }
+      .navbar .navbar-brand {
+        font-weight: bold;
+        font-size: 24px; /* Slightly larger title */
+        color: white !important;
+        text-shadow: none; /* Remove old text shadow */
+        letter-spacing: 0.5px;
+      }
+      .navbar .navbar-nav > li > a {
+        color: rgba(255, 255, 255, 0.8) !important; /* Slightly transparent white for links */
+        font-weight: 500; /* Medium weight */
+        text-shadow: none;
+        padding-left: 20px; /* More padding for spacious feel */
+        padding-right: 20px;
+        border-radius: 8px; /* Rounded corners for tabs */
+        transition: background 0.3s ease, color 0.3s ease; /* Smooth transition */
+      }
+      .navbar .navbar-nav > li > a:hover {
+        background-color: rgba(255, 255, 255, 0.15) !important; /* Light highlight on hover */
+        color: white !important;
+      }
+      .navbar .navbar-nav > .active > a,
+      .navbar .navbar-nav > .active > a:focus,
+      .navbar .navbar-nav > .active > a:hover {
+        background: rgba(255, 255, 255, 0.25) !important; /* More pronounced active state */
+        color: white !important;
+        border-radius: 8px;
+      }
+
+      /* Logo container - keep current styling */
       #logo-container {
         position: fixed;
         top: 10px;
@@ -84,161 +139,211 @@ ui <- navbarPage(
         margin-top: 5px;
         height: 25px;
       }
-      /* Navbar background gradient */
-      .navbar {
-        background: linear-gradient(to right, #2193b0, #6dd5ed);
-        border-bottom: 3px solid #1565c0;
-      }
-      .navbar .navbar-nav > li > a {
-        color: white !important;
-        font-weight: bold;
-        text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
-      }
-      .navbar .navbar-nav > .active > a,
-      .navbar .navbar-nav > .active > a:focus,
-      .navbar .navbar-nav > .active > a:hover {
-        background: linear-gradient(to right, #43cea2, #185a9d) !important;
-        color: white !important;
-      }
-      /* Dropdown menu style */
-      .dropdown-menu {
-        background: linear-gradient(to bottom right, #ffffff, #f3f3f3);
-        border: none;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-      }
-      .dropdown-menu > li > a {
-        color: #333;
-        font-weight: 500;
-      }
-      .dropdown-menu > li > a:hover {
-        background-color: #e0f7fa;
-        color: #000;
-      }
+
+      /* Collapsible sections */
       .collapsible-container {
-        border: 1px solid #90caf9;
-        border-radius: 8px;
-        padding: 10px;
-        margin-bottom: 10px;
-        box-shadow: 1px 1px 5px rgba(0,0,0,0.1);
+        border: none; /* Remove border */
+        border-radius: 12px; /* More rounded */
+        box-shadow: 0 4px 15px rgba(0,0,0,0.08); /* Softer, wider shadow */
+        margin-bottom: 20px; /* More space below */
+        background-color: white; /* Clean white background */
+        overflow: hidden; /* Ensure rounded corners clip content */
       }
       .collapsible-header {
-        background: linear-gradient(to right, #e3f2fd, #bbdefb);
-        padding: 12px 16px;
-        font-size: 18px;
-        font-weight: bold;
-        cursor: pointer;
-        border-top-left-radius: 10px;
-        border-top-right-radius: 10px;
-        transition: background 0.3s ease;
+        background: linear-gradient(to right, #e0f7fa, #cfe8fb); /* Softer blue gradient */
+        padding: 15px 20px; /* More padding */
+        font-size: 1.2em; /* Slightly larger font */
+        font-weight: 600; /* Bolder */
+        border-radius: 12px 12px 0 0; /* Only top corners rounded */
+        color: #212529; /* Darker text */
         display: flex; /* For aligning arrow */
         justify-content: space-between; /* For aligning arrow */
         align-items: center; /* For aligning arrow */
       }
       .collapsible-header:hover {
-        background: linear-gradient(to right, #bbdefb, #90caf9);
+        background: linear-gradient(to right, #cfe8fb, #b3d9ff); /* Slightly deeper gradient on hover */
       }
       .collapsible-body {
-        max-height: 0;
+        max-height: 0; /* Hidden by default if no 'open' class */
         overflow: hidden;
-        transition: max-height 0.4s ease;
-        padding: 0 16px;
+        transition: max-height 0.4s ease, padding 0.4s ease; /* Smooth transition */
+        padding: 0 20px; /* Initial padding */
+        background-color: white; /* Ensures consistent background */
+        border-top: 1px solid #eee; /* Subtle separator */
       }
       .collapsible-body.open {
-        max-height: 1000px; /* Large enough to show full content */
+        max-height: 1000px; /* Large enough to show full content, adjust if needed */
+        padding: 15px 20px; /* Expanded padding */
       }
+
+      /* Info Cards (general styling) */
       .info-card {
-        background: linear-gradient(to right, #e0f7fa, #e1bee7);
-        border-radius: 15px;
-        padding: 15px;
-        margin-bottom: 10px;
-        box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
+        border-radius: 18px; /* Even more rounded */
+        padding: 20px; /* More padding */
+        margin-bottom: 20px; /* More margin */
+        box-shadow: 0 6px 20px rgba(0,0,0,0.12); /* Deeper, softer shadow */
+        transition: transform 0.3s ease-in-out, box-shadow 0.3s ease-in-out; /* Increase transition time for smoothness */
+        height: 100%; /* Ensure cards fill column height */
+        display: flex; /* Flexbox for centering content */
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
         text-align: center;
+        position: relative; /* Needed for any absolute positioning inside if needed */
+        overflow: hidden; /* Clip content for rounded corners */
+        cursor: pointer; /* Indicate clickability */
+      }
+      .info-card:hover {
+        transform: translateY(-8px) scale(1.03); /* More pronounced pop out */
+        box-shadow: 0 12px 28px rgba(0,0,0,0.3); /* Even more enhanced shadow */
       }
       .info-card h4 {
-        margin-top: 0;
-        margin-bottom: 5px;
-        font-weight: bold;
+        font-size: 1.5em; /* Larger title */
+        margin-bottom: 10px;
+        color: #333; /* Darker title color */
       }
       .info-card p {
-        margin: 0;
-        font-size: 18px; /* Increased from 16px */
+        font-size: 1.1em; /* Slightly larger paragraph text */
+        line-height: 1.6;
+        color: #555; /* Softer text color */
       }
+
+      /* Specific Info Card colors for REC Profiles tab*/
+      .info-card-weather {
+        background: linear-gradient(135deg, #87ceeb, #a8dadc); /* Sky Blue */
+      }
+      .info-card-soil {
+        background: linear-gradient(135deg, #a0522d, #deb887); /* Brown */
+      }
+      .info-card-crops {
+        background: linear-gradient(135deg, #90ee90, #c7e9b4); /* Light Green */
+      }
+      
+      /* Specific Info Card colors for Climate Yearly Summary tab */
+      /* Reverted to a general light blue/purple gradient for consistency in Climate tab info cards */
+      .info-card-climate-default {
+        background: linear-gradient(135deg, #e0f7fa, #e1bee7); /* A light, pleasant gradient */
+      }
+
+      /* Tabs */
       .nav-tabs > li > a {
-        color: #333; font-weight: bold;
-        background-color: #f0f0f0;
+        font-weight: 600; /* Bolder tab text */
+        color: #495057; /* Darker default text */
+        background-color: #e9ecef; /* Lighter tab background */
+        border-radius: 8px 8px 0 0; /* Rounded top corners */
+        margin-right: 5px; /* Small gap between tabs */
+        transition: background-color 0.3s ease, color 0.3s ease;
       }
-      .nav-tabs > li.active > a {
-        background: linear-gradient(to right, #74ebd5, #9face6);
-        color: black !important;
+      .nav-tabs > li > a:hover {
+        background-color: #dee2e6; /* Lighter hover */
       }
-      /* Custom CSS for progress circle */
+      .nav-tabs > li.active > a,
+      .nav-tabs > li.active > a:focus,
+      .nav-tabs > li.active > a:hover {
+        background: linear-gradient(to right, #4CAF50, #66bb6a) !important; /* Green gradient for active tab */
+        color: white !important; /* White text for active tab */
+        border-color: transparent !important; /* No border */
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1); /* Subtle shadow for active tab */
+      }
+
+      /* Main panel and sidebar panel styling */
+      .main-panel, .well {
+        background-color: #ffffff; /* White background for main content */
+        border: none; /* Remove default border */
+        border-radius: 12px; /* Rounded corners */
+        box-shadow: 0 4px 15px rgba(0,0,0,0.08); /* Consistent shadow */
+        padding: 25px; /* More padding */
+        margin-top: 20px; /* Space from navbar */
+      }
+      .sidebar-panel { /* Shiny's default sidebar has `well` class, need to override or specifically target */
+        background-color: #ffffff;
+        border-radius: 12px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        padding: 25px;
+      }
+
+      /* Plot outputs */
+      .shiny-plot-output {
+        border-radius: 15px; /* Rounded plot borders */
+        overflow: hidden; /* Ensure plot content respects border-radius */
+        box-shadow: 0 2px 10px rgba(0,0,0,0.08); /* Subtle shadow for plots */
+      }
+
+      /* Inputs - basic styling refinement */
+      .form-control {
+        border-radius: 8px; /* Rounded input fields */
+        border-color: #ced4da; /* Softer border color */
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+      .form-control:focus {
+        border-color: #80bdff; /* Blue border on focus */
+        box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25); /* Blue shadow on focus */
+      }
+      .btn {
+        border-radius: 8px; /* Rounded buttons */
+        font-weight: 500;
+        transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+      .btn-default {
+        background-color: #e9ecef;
+        border-color: #dee2e6;
+        color: #343a40;
+      }
+      .btn-default:hover {
+        background-color: #dee2e6;
+        border-color: #ced4da;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      }
+      .btn-default:active {
+        transform: translateY(1px); /* Slight press effect */
+        box-shadow: none;
+      }
+
+      /* Leaflet maps - ensure responsiveness */
+      .leaflet-container {
+        border-radius: 15px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+      }
+
+      /* Progress Circle refinement */
       .progress-circle-container {
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: center;
         margin-top: 20px;
       }
+
       .progress-circle {
-        width: 180px; /* Larger size */
-        height: 180px; /* Larger size */
-        border-radius: 50%;
         position: relative;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-        background: conic-gradient(
-          #002060 0% var(--percentage), /* Dark blue for the filled part */
-          #e0e0e0 var(--percentage) 100% /* Light gray for the unfilled part */
-        );
-      }
-      .progress-inner-circle { /* New element for the white background behind text */
-        position: absolute;
-        width: 120px; /* Size for inner white circle */
-        height: 120px;
+        width: 150px;
+        height: 150px;
         border-radius: 50%;
-        background: white; /* Inner white background */
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 1; /* Ensure this is above the conic gradient */
-      }
-      .progress-circle .progress-value {
-        position: relative; /* Essential for z-index to work against siblings */
-        z-index: 2; /* Ensure text is above the inner white circle */
-        color: #000; /* Explicitly set to black */
+        background: radial-gradient(closest-side, white 79%, transparent 80% 100%),
+                    conic-gradient(#4CAF50 var(--percentage), #e0e0e0 0); /* Green for progress, light gray for remainder */
+        display: grid;
+        place-items: center;
+        font-size: 1.8em;
         font-weight: bold;
-        font-size: 2.5em; /* Increased font size for visibility */
+        color: #333;
+        box-shadow: 0 6px 15px rgba(0,0,0,0.15); /* More prominent shadow */
+      }
+
+      .progress-circle .progress-value {
+        font-size: 1.8em; /* Adjusted size to fit within circle */
+        color: #212529; /* Darker for contrast */
+        z-index: 2; /* Ensure text is above gradient */
       }
       .progress-text {
-        margin-top: 10px;
-        font-size: 1.2em;
-        color: #555;
+        font-size: 1.3em; /* Slightly larger text */
+        color: #6c757d; /* Softer grey */
+        margin-top: 10px; /* Space between circle and text */
       }
-      /* Styles for new info cards for REC Profiles tab */
-      .rec-profile-section {
-        margin-top: 20px;
-        padding: 15px;
-        border: 1px solid #ddd;
-        border-radius: 10px;
-        background-color: #f9f9f9;
-        box-shadow: 1px 1px 5px rgba(0,0,0,0.05);
-      }
-      .rec-profile-section h5 {
-        margin-top: 0;
-        color: #007bff;
-        font-weight: bold;
-        border-bottom: 2px solid #007bff;
-        padding-bottom: 5px;
-        margin-bottom: 10px;
-      }
-      .arrow-icon {
-        display: inline-block;
-        transition: transform 0.3s ease;
-      }
-      .arrow-icon.rotate {
-        transform: rotate(180deg);
+
+      /* Responsive adjustments for columns */
+      @media (max-width: 767px) {
+        .rec-info-card-item {
+          flex: 1 1 100%; /* Stack cards on small screens */
+        }
       }
     "))
   ),
@@ -248,18 +353,20 @@ ui <- navbarPage(
              tabPanel("About",
                       fluidPage(
                         br(),
-                        h1("   📘    Welcome to the \ud83c\udf24\ufe0f UGA REC Climate Dashboard"),
+                        h1("    📘     Welcome to the \ud83c\udf24\ufe0f UGA REC Climate Dashboard"),
                         p("This dashboard provides insights into historical weather data collected across multiple UGA Research and Extension Centers."),
                         div(class = "collapsible-container",
-                            div(class = "collapsible-header", "   📱    About the App 🔽"),
-                            div(class = "collapsible-body",
+                            div(class = "collapsible-header", "    📱     About the App  🔽 "),
+                            # Added 'open' class here to make it open by default
+                            div(class = "collapsible-body open",
                                 tags$p("This interactive dashboard was built using the R Shiny framework was developed to", tags$strong("demonstrate the potential of dynamic web-based applications"), "for exploring climate variability across the University of Georgia’s Research and Education Centers (UGA RECs)."),
                                 tags$p("The dashboard is fully reactive, allowing real-time exploration of precipitation and temperature data across multiple locations and years, months, and site selection.")
                             )
                         ),
                         div(class = "collapsible-container",
-                            div(class = "collapsible-header", "   📦    Data Description 🔽"),
-                            div(class = "collapsible-body",
+                            div(class = "collapsible-header", "    📦     Data Description  🔽 "),
+                            # Added 'open' class here to make it open by default
+                            div(class = "collapsible-body open",
                                 tags$p("The dataset used in this dashboard originates from ",
                                        tags$strong("Daymet — Daily Surface Weather and Climatological Summaries"),
                                        ", a high-resolution gridded dataset developed and maintained by the ",
@@ -287,8 +394,9 @@ ui <- navbarPage(
                             )
                         ),
                         div(class = "collapsible-container",
-                            div(class = "collapsible-header", "   🔍    Features 🔽"),
-                            div(class = "collapsible-body",
+                            div(class = "collapsible-header", "    🔍     Features  🔽 "),
+                            # Added 'open' class here to make it open by default
+                            div(class = "collapsible-body open",
                                 tags$ul(
                                   tags$li("Interactive map for location selection"),
                                   tags$li("Monthly raw data distributions for temperature and precipitation"),
@@ -297,8 +405,9 @@ ui <- navbarPage(
                                   tags$li("Regression modeling and comparisons across sites")
                                 ))),
                         div(class = "collapsible-container",
-                            div(class = "collapsible-header", "   👥    Contributors 🔽"),
-                            div(class = "collapsible-body",
+                            div(class = "collapsible-header", "    👥     Contributors  🔽 "),
+                            # Added 'open' class here to make it open by default
+                            div(class = "collapsible-body open",
                                 tags$ul(
                                   tags$li(strong("Anish Bhattarai"), " – Graduate Research Assistant, Integrative Precison Ag, Department of Crop and Soil Science"),
                                   tags$li(strong("Dr. Gonzalo Scarpin"), " - Post-Doctoral Research Fellow, Integrative Precison Ag, Department of Crop and Soil Science"),
@@ -306,7 +415,7 @@ ui <- navbarPage(
                                   tags$li(strong("Amrinder Jakhar"), " - Graduate Research Assistant, Integrative Precison Ag, Department of Crop and Soil Science"),
                                   tags$li(strong("Dr. Leonardo M. Bastos"), " – Assistant Professor, Integrative Precison Ag, UGA Crop & Soil Sciences")
                                 ))),
-                        h3("   📚    Data Source"),
+                        h3("    📚     Data Source"),
                         p("Data are derived from the Daymet gridded daily weather dataset."),
                         br()
                       )
@@ -347,7 +456,7 @@ ui <- navbarPage(
              )
   ),
   navbarMenu("Climate",
-             tabPanel("Data",
+             tabPanel("Data", # This tabPanel has value "Data"
                       fluidPage(
                         sidebarLayout(
                           sidebarPanel(
@@ -366,12 +475,12 @@ ui <- navbarPage(
                           ),
                           mainPanel(
                             tabsetPanel(id = "tabs_climate",
-                                        tabPanel("   📆    Monthly Summary", value = "raw_density", plotOutput("monthly_summary_plot", height = 1000)),
+                                        tabPanel("    📆     Monthly Summary", value = "raw_density", plotOutput("monthly_summary_plot", height = 1000)),
                                         tabPanel("∑ Yearly Summary", value = "trend",
                                                  plotOutput("yearly_summary_plot"),
                                                  uiOutput("info_cards_climate")),
-                                        tabPanel("   📈    Trend", value = "regression", plotOutput("regression_plot")),
-                                        tabPanel("   📊    Comparison", value = "comparison", plotOutput("comparison_plot"))
+                                        tabPanel("    📈     Trend", value = "regression", plotOutput("regression_plot")),
+                                        tabPanel("    📊     Comparison", value = "comparison", plotOutput("comparison_plot"))
                             )
                           )
                         )
@@ -379,7 +488,7 @@ ui <- navbarPage(
              )
   ),
   navbarMenu("Soil",
-             tabPanel("Data",
+             tabPanel("Data", # This tabPanel has value "Data"
                       fluidPage(
                         sidebarLayout(
                           sidebarPanel(
@@ -401,7 +510,10 @@ ui <- navbarPage(
                                                    uiOutput("info_cards_soil")),
                                                  conditionalPanel(
                                                    condition = "input.soil_variable == 'Textural Class'",
-                                                   plotOutput("triangle_plot", height = "700px"),
+                                                   # Replaced plotOutput with img tag for PNG image
+                                                   tags$img(src = "textural_triangle.png", # Updated image source
+                                                            alt = "USDA Soil Textural Class Triangle",
+                                                            style = "max-width: 90%; height: auto; display: block; margin: auto; padding-top: 20px;"),
                                                    uiOutput("info_cards_soil")
                                                  )
                                         )
@@ -416,12 +528,12 @@ ui <- navbarPage(
                       fluidPage(
                         sidebarLayout(
                           sidebarPanel(
-                            h4("   📍    Click on a REC to View Profile"),
+                            h4("    📍     Click on a REC to View Profile"),
                             leafletOutput("rec_profile_map", height = 500),
                             width = 4 # Changed width to 4 for more main panel space
                           ),
                           mainPanel(
-                            h3("   🏷️    REC Profile Summary"),
+                            h3("    🏷️     REC Profile Summary"),
                             uiOutput("rec_profile_cards") # Changed ID to plural for multiple cards
                           )
                         )
@@ -527,7 +639,7 @@ server <- function(input, output, session) {
       dplyr::select(4, value = claytotal_r, geometry)
   })
   
-  # Soil texture triangle data
+  # Soil texture triangle data (no longer directly plotted, but data still used in rec_summary if needed elsewhere)
   triangle_data <- reactive({
     readRDS(paste0(CLOUD_DATA_BASE_URL, "03_recs_soil_dist.rds")) %>%
       st_drop_geometry() %>%
@@ -692,13 +804,12 @@ server <- function(input, output, session) {
       percentage <- round((within_counties_count / total_counties) * 100, 1)
     }
     
+    # Render the circular progress bar using the defined CSS
     div(class = "progress-circle-container",
         div(class = "progress-circle", style = paste0("--percentage:", percentage, "%"),
-            div(class = "progress-inner-circle", # New div for inner circle and text
-                span(class = "progress-value", paste0(percentage, "%"))
-            )
+            span(class = "progress-value", paste0(percentage, "%")) # Display percentage inside the circle
         ),
-        div(class = "progress-text", paste0(within_counties_count, " out of ", total_counties, " counties"))
+        div(class = "progress-text", paste0(within_counties_count, " out of ", total_counties, " counties")) # Text below the circle
     )
   })
   
@@ -976,15 +1087,15 @@ server <- function(input, output, session) {
         theme_minimal()+
         theme(legend.position = "none",
               plot.title = element_text(size = 14, face = "bold"),
-              axis.title = element_text(size = 18, face = "bold"),
+              axis.title = element_text(size = 16, face = "bold"),
               axis.text = element_text(size = 15))
     }
     p
   })
   
-  # Helper for info cards
+  # Helper for info cards - now uses 'info-card-climate-default'
   render_climate_info_card <- function(title, value, unit, year) {
-    div(class = "info-card",
+    div(class = "info-card info-card-climate-default", # Always apply this class
         h4(title),
         p(paste("Value:", paste0(round(value, 1), " ", unit))),
         p(paste("Year:", year))
@@ -998,7 +1109,7 @@ server <- function(input, output, session) {
         column(6, uiOutput("max_temp_card")),
         column(6, uiOutput("min_temp_card"))
       )
-    } else {
+    } else { # Precipitation
       fluidRow(
         column(6, uiOutput("max_prcp_card")),
         column(6, uiOutput("min_prcp_card"))
@@ -1013,7 +1124,7 @@ server <- function(input, output, session) {
       group_by(year) %>%
       summarise(avg_temp = mean((tmax_deg_c + tmin_deg_c)/2, na.rm = TRUE)) %>%
       slice_max(avg_temp, n = 1)
-    render_climate_info_card("Max Temperature", df$avg_temp, "°C", df$year)
+    render_climate_info_card("Max Temperature", df$avg_temp, "°C", df$year) # Removed specific color class
   })
   
   output$min_temp_card <- renderUI({
@@ -1023,7 +1134,7 @@ server <- function(input, output, session) {
       group_by(year) %>%
       summarise(avg_temp = mean((tmax_deg_c + tmin_deg_c)/2, na.rm = TRUE)) %>%
       slice_min(avg_temp, n = 1)
-    render_climate_info_card("Min Temperature", df$avg_temp, "°C", df$year)
+    render_climate_info_card("Min Temperature", df$avg_temp, "°C", df$year) # Removed specific color class
   })
   
   output$max_prcp_card <- renderUI({
@@ -1033,7 +1144,7 @@ server <- function(input, output, session) {
       group_by(year) %>%
       summarise(cum_prcp = sum(prcp_mm_day, na.rm = TRUE)) %>%
       slice_max(cum_prcp, n = 1)
-    render_climate_info_card("Max Precipitation", df$cum_prcp, "mm", df$year)
+    render_climate_info_card("Max Precipitation", df$cum_prcp, "mm", df$year) # Removed specific color class
   })
   
   output$min_prcp_card <- renderUI({
@@ -1043,7 +1154,7 @@ server <- function(input, output, session) {
       group_by(year) %>%
       summarise(cum_prcp = sum(prcp_mm_day, na.rm = TRUE)) %>%
       slice_min(cum_prcp, n = 1)
-    render_climate_info_card("Min Precipitation", df$cum_prcp, "mm", df$year)
+    render_climate_info_card("Min Precipitation", df$cum_prcp, "mm", df$year) # Removed specific color class
   })
   
   regression_data <- reactive({
@@ -1109,7 +1220,7 @@ server <- function(input, output, session) {
         theme(legend.position = "none",
               plot.title = element_text(size = 14, face = "bold"),
               axis.title = element_text(size = 16, face = "bold"),
-              axis.text = element_text(size = 12))
+              axis.text = element_text(size = 15))
     }
     p
   })
@@ -1263,7 +1374,7 @@ server <- function(input, output, session) {
   
   output$density_dist_soil_plot <- renderPlot({
     req(input$soil_variable)
-    if (input$soil_variable == "Textural Class") return(NULL)
+    if (input$soil_variable == "Textural Class") return(NULL) # This plot is not for Textural Class
     req(raster_data_soil(), recs_raw_df()) # Ensure data is loaded
     df_raw_soil <- raster_data_soil()
     df_recs_soil <- recs_raw_df()
@@ -1291,43 +1402,8 @@ server <- function(input, output, session) {
     }
   })
   
-  output$triangle_plot <- renderPlot({
-    req(input$soil_variable == "Textural Class")
-    req(triangle_data(), class_poly_data(), label_centroids_data()) # Ensure all necessary data is loaded
-    triangle_recs <- triangle_data()
-    class_poly <- class_poly_data()
-    label_centroids <- label_centroids_data()
-    
-    loc_levels_t <- levels(factor(triangle_recs$loc))
-    loc_colors_t <- setNames(location_colors(loc_levels_t), loc_levels_t)
-    selected_t <- clicked_loc_soil()
-    
-    triangle_recs$alpha <- if (!is.null(selected_t)) {
-      ifelse(triangle_recs$loc == selected_t, 1, 0.15)
-    } else {
-      0.7
-    }
-    
-    ggtern(data = class_poly, aes(x = SAND, y = CLAY, z = SILT)) +
-      geom_polygon(aes(group = group), fill = "gray85", color = "black", alpha = 0.5) +
-      geom_text(data = label_centroids, aes(label = LABEL_SHORT),
-                size = 4.5, fontface = "bold", color = "black", alpha = 0.5) +
-      geom_point(data = triangle_recs,
-                 aes(x = SAND, y = CLAY, z = SILT, fill = loc, alpha = alpha),
-                 size = 4, shape = 21, color = "black") +
-      scale_fill_manual(values = loc_colors_t) +
-      labs(title = "USDA Soil Texture Triangle", color = "RECs",
-           T = "[%] Clay 0–2 µm", L = "[%] Sand 2–50 µm", R = "[%] Silt 50–2000 µm") +
-      ggtern::theme_rgbw() +
-      theme_showarrows() +
-      theme(legend.position = "bottom",
-            plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
-            tern.axis.title.T = element_text(face = "bold", size = 12),
-            tern.axis.title.L = element_text(face = "bold", size = 12),
-            tern.axis.title.R = element_text(face = "bold", size = 12),
-            panel.grid.major = element_line(color = "gray80", linetype = "dotted"),
-            panel.grid.minor = element_line(color = "gray80", linetype = "dotted", linewidth = 0.3))
-  })
+  # Removed triangle_plot output as it's replaced by an image
+  # output$triangle_plot <- renderPlot({...})
   
   # --- By RECs Tab Logic ---
   # Render initial REC profile map
@@ -1396,7 +1472,31 @@ server <- function(input, output, session) {
     }
   })
   
-  # Changed: Separate info card sections for By RECs tab with collapsibility
+  # Server-side logic to handle tab redirection based on JS input
+  observeEvent(input$redirectTabRequest, {
+    req(input$redirectTabRequest)
+    target_tab_menu <- input$redirectTabRequest$tab
+    current_rec <- input$redirectTabRequest$location # Get location directly from JS payload
+    
+    # Update the location input in the target tab
+    if (!is.null(current_rec)) {
+      if (target_tab_menu == "Climate") {
+        updateSelectInput(session, "location", selected = current_rec)
+        # Setting a default variable is good for initial context
+        updateSelectInput(session, "climate_variable", selected = "Temperature")
+      } else if (target_tab_menu == "Soil") {
+        updateSelectInput(session, "location", selected = current_rec)
+        # Setting a default variable is good for initial context
+        updateSelectInput(session, "soil_variable", selected = "Sand (%)")
+      }
+    }
+    
+    # Switch to the main navbar menu
+    updateNavbarPage(session, inputId = "mainNavbar", selected = target_tab_menu)
+  })
+  
+  # Updated: Arranged weather and soil info in two columns within the main panel
+  # and added two new placeholder cards for "Crops Grown"
   output$rec_profile_cards <- renderUI({
     loc_rp <- selected_profile_rec()
     if (is.null(loc_rp)) {
@@ -1408,23 +1508,45 @@ server <- function(input, output, session) {
     }
     
     tagList(
-      div(class = "collapsible-container",
-          div(class = "collapsible-header", "   ☁️    Weather Summary 🔽"),
-          div(class = "collapsible-body open", # Default to open
-              div(class = "info-card",
-                  h4(rec$loc),
-                  p(tags$b("Avg Temp:"), paste0(round(rec$value.x, 1), " °C")),
-                  p(tags$b("Avg Precip:"), paste0(round(rec$value.y, 1), " mm"))
-              )
-          )
+      fluidRow(
+        # Left column for Weather Summary (single info card)
+        column(6,
+               tags$h4("    ☁️     Weather Summary"),
+               div(id = "weatherCard",
+                   class = "info-card fixed-height info-card-weather", # Added fixed-height and custom color class
+                   # Removed confirmation modal, directly redirect
+                   onclick = sprintf("showConfirmModal('Redirecting to Climate tab for %s', 'Climate', '%s');", loc_rp, loc_rp),
+                   h4(rec$loc), # Display location name at the top of the card
+                   p(tags$b("Avg Temp:"), paste0(round(rec$value.x, 1), " °C")),
+                   p(tags$b("Avg Precip:"), paste0(round(rec$value.y, 1), " mm"))
+               )
+        ),
+        # Right column for Soil Composition (pie chart)
+        column(6,
+               tags$h4("    🌱     Soil Composition"),
+               div(id = "soilCard",
+                   class = "info-card fixed-height info-card-soil", # Added fixed-height and custom color class
+                   # Removed confirmation modal, directly redirect
+                   onclick = sprintf("showConfirmModal('Redirecting to Soil tab for %s', 'Soil', '%s');", loc_rp, loc_rp),
+                   plotOutput("soil_composition_pie_chart", height = "300px")
+               )
+        )
       ),
-      div(class = "collapsible-container",
-          div(class = "collapsible-header", "   🌱    Soil Composition 🔽"),
-          div(class = "collapsible-body open", # Default to open
-              div(class = "info-card",
-                  plotOutput("soil_composition_pie_chart")
-              )
-          )
+      fluidRow( # New row for "Crops Grown" information
+        column(6,
+               tags$h4("    🌾     Crops Grown (Example 1)"),
+               div(class = "info-card fixed-height info-card-crops", # Added fixed-height and custom color class
+                   p("Common Crops: Corn, Soybean, Wheat"),
+                   p("Specialty Crops: Peanuts, Cotton")
+               )
+        ),
+        column(6,
+               tags$h4("    🚜     Crops Grown (Example 2)"),
+               div(class = "info-card fixed-height info-card-crops", # Added fixed-height and custom color class
+                   p("Pasture, Forage, Pecans"),
+                   p("Vegetables: Tomato, Pepper")
+               )
+        )
       )
     )
   })
@@ -1459,18 +1581,18 @@ server <- function(input, output, session) {
                 position = position_stack(vjust = 0.5),
                 color = "black", # Set text color to black
                 fontface = "bold", # Set font to bold
-                size = 5) + # Increased size for readability
+                size = 4) + # Adjusted size for readability given smaller plot
       scale_fill_manual(values = pie_colors) +
-      labs(title = paste("Soil Composition for", loc_rp),
+      labs(title = paste("Soil Composition for\n", loc_rp),
            caption = "Data source: Soil Survey Geographic Database (SSURGO)") + # Added caption
       theme_void() + # Remove all background elements
       theme(
-        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Adjusted title size
         legend.position = "bottom",
         legend.title = element_blank(), # Remove legend title
         plot.background = element_rect(fill = "transparent", color = NA), # Transparent background
         panel.background = element_rect(fill = "transparent", color = NA), # Transparent panel background
-        plot.caption = element_text(hjust = 0.5, size = 10, face = "italic") # Style the caption
+        plot.caption = element_text(hjust = 0.5, size = 9, face = "italic") # Style the caption
       )
   })
 }
